@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 
 import "./Tooltip.scss";
 
@@ -70,13 +70,41 @@ const TOOLTIP_WARM_WINDOW = 300;
 
 let showTooltipTimer = 0;
 let tooltipHiddenAt = 0;
+/**
+ * the wrapper the visible (or pending) tooltip belongs to. All tooltips share
+ * one DOM node & timer, so without an owner an unrelated wrapper unmounting
+ * would cancel/hide a tooltip someone else is still hovering.
+ */
+let tooltipOwner: HTMLDivElement | null = null;
 
-const hideTooltip = () => {
+/** hides the tooltip & cancels a pending one, whichever wrapper owns it */
+export const hideTooltip = () => {
   clearTimeout(showTooltipTimer);
-  const tooltip = getTooltipDiv();
-  if (tooltip.classList.contains("excalidraw-tooltip--visible")) {
+  showTooltipTimer = 0;
+  tooltipOwner = null;
+  // a plain query, so that hiding never creates the tooltip node
+  const tooltip = document.querySelector<HTMLDivElement>(".excalidraw-tooltip");
+  if (tooltip?.classList.contains("excalidraw-tooltip--visible")) {
     tooltip.classList.remove("excalidraw-tooltip--visible");
     tooltipHiddenAt = Date.now();
+  }
+};
+
+/** hides the tooltip only if `item` is the wrapper that owns it */
+const hideTooltipOf = (item: HTMLDivElement) => {
+  if (tooltipOwner === item) {
+    hideTooltip();
+  }
+};
+
+/**
+ * hides the tooltip if its wrapper left the DOM (unmounted, or `disabled`)
+ * without a pointerleave to retract it. A no-op while no tooltip is owned, so
+ * that unmounting a wrapper that was never hovered doesn't touch the DOM.
+ */
+const hideOrphanedTooltip = () => {
+  if (tooltipOwner && !tooltipOwner.isConnected) {
+    hideTooltip();
   }
 };
 
@@ -116,9 +144,21 @@ export const Tooltip = ({
   disabled,
   delay = false,
 }: TooltipProps) => {
+  // a delayed tooltip shows up to TOOLTIP_DELAY after the pointer entered, by
+  // which time the label may have changed
+  const labelRef = useRef(label);
+  labelRef.current = label;
+
+  useEffect(() => hideOrphanedTooltip, []);
+
+  // `disabled` removes the wrapper from the DOM without unmounting the
+  // component, so no pointerleave & no effect cleanup would retract it
   useEffect(() => {
-    return () => hideTooltip();
-  }, []);
+    if (disabled) {
+      hideOrphanedTooltip();
+    }
+  }, [disabled]);
+
   if (disabled) {
     return null;
   }
@@ -127,15 +167,19 @@ export const Tooltip = ({
       className={clsx("excalidraw-tooltip-wrapper", className)}
       onPointerEnter={(event) => {
         const item = event.currentTarget as HTMLDivElement;
-        const show = () => updateTooltip(item, getTooltipDiv(), label, long);
+        const show = () =>
+          updateTooltip(item, getTooltipDiv(), labelRef.current, long);
         clearTimeout(showTooltipTimer);
+        tooltipOwner = item;
         if (delay && Date.now() - tooltipHiddenAt > TOOLTIP_WARM_WINDOW) {
           showTooltipTimer = window.setTimeout(show, TOOLTIP_DELAY);
         } else {
           show();
         }
       }}
-      onPointerLeave={hideTooltip}
+      onPointerLeave={(event) =>
+        hideTooltipOf(event.currentTarget as HTMLDivElement)
+      }
       style={style}
     >
       {children}
